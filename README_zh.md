@@ -137,6 +137,20 @@ MineContext 非常注重用户隐私，所有数据都默认保存在本地如�
 以下是获取了 API Key 后的填写流程：
 ![Enter API-Key](src/Enter-API-Key.gif)
 
+## 本 Fork 的 Vertex AI 支持
+
+这个 fork 增加了面向 Google Cloud Vertex AI 的可维护支持，适合需要使用 Gemini on Vertex 的场景。
+
+- Vertex 聊天模型使用 ADC 自动刷新 OAuth 访问令牌
+- Vertex Embedding 改为调用原生 `publishers/google/models/*:predict` 接口，而不是 OpenAI 兼容 `/embeddings`
+- `gemini-embedding-001` 在聊天 Base URL 使用 `global` 时会自动回退到文档中推荐的区域端点
+- 自定义模型校验允许 Vertex 风格配置，而不强制要求长期静态 API Key
+
+详细说明见：
+
+- [Vertex 配置与实现说明](docs/vertex.md)
+- [本 fork 的 PR 摘要](docs/pr_summary.md)
+
 ## 3. 开始记录
 
 进入【Screen Monitor】启用屏幕分享的系统权限，设置完之后需要重新启动应用使其生效。

@@ -141,6 +141,23 @@ The following is the filling process after obtaining the API Key:
 
 ![Enter API Key](src/Enter-API-Key.gif)
 
+## Vertex AI Support In This Fork
+
+This fork adds a maintained Vertex AI path for users who need Gemini models on Google Cloud instead of Doubao or a standard OpenAI-compatible provider.
+
+What changed:
+
+- Vertex chat uses Google ADC-backed OAuth token refresh automatically.
+- Vertex embeddings use the native Vertex `publishers/google/models/*:predict` API instead of the OpenAI-compatible `/embeddings` route.
+- `gemini-embedding-001` automatically falls back to the documented regional endpoint when your chat base URL is `global`.
+- Custom model validation accepts Vertex-style configuration without requiring a long-lived static API key.
+- The desktop app can be pointed at the patched backend with `scripts/packaged_backend_wrapper.sh`.
+
+Recommended reading:
+
+- [Vertex setup and rationale](docs/vertex.md)
+- [PR summary for this fork](docs/pr_summary.md)
+
 ## 3. Start Recording
 
 Enter [Screen Monitor] to enable the system permissions for screen sharing. After completing the setup, you need to restart the application for the changes to take effect.
