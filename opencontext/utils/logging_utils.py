@@ -19,7 +19,7 @@ def setup_logging(config: Dict[str, Any]):
     Args:
         config (Dict[str, Any]): Logging configuration
     """
-    log_manager.configure(config)
+    log_manager.configure(config or {})
     log.info("Logging setup completed")
 
 

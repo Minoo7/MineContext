@@ -96,6 +96,12 @@ class GlobalConfig:
         # Initialize the configuration manager
         if self._config_manager is None:
             self._config_manager = ConfigManager()
+        should_reload_config = (
+            self._config_manager.get_config() is None
+            or (config_path and config_path != self._config_manager.get_config_path())
+        )
+
+        if should_reload_config:
             config_loaded = self._config_manager.load_config(config_path)
             if config_loaded:
                 self._config_path = self._config_manager.get_config_path()
@@ -105,7 +111,7 @@ class GlobalConfig:
                 success = False
 
         # Initialize the prompt manager
-        if self._prompt_manager is None:
+        if self._prompt_manager is None or should_reload_config:
             if not self._init_prompt_manager():
                 success = False
 

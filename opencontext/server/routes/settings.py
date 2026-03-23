@@ -17,6 +17,7 @@ from opencontext.config.global_config import GlobalConfig
 from opencontext.llm.global_embedding_client import GlobalEmbeddingClient
 from opencontext.llm.global_vlm_client import GlobalVLMClient
 from opencontext.llm.llm_client import LLMClient, LLMType
+from opencontext.llm.vertex_auth import is_vertex_openai_base_url
 from opencontext.server.middleware.auth import auth_dependency
 from opencontext.server.utils import convert_resp
 from opencontext.utils.logging_utils import get_logger
@@ -69,8 +70,16 @@ def _build_llm_config(
         config["timeout"] = kwargs["timeout"]
 
     if llm_type == LLMType.EMBEDDING:
-        config["output_dim"] = kwargs.get("output_dim", 2048)
+        output_dim = kwargs.get("output_dim")
+        if output_dim is not None:
+            config["output_dim"] = output_dim
+        elif not is_vertex_openai_base_url(base_url):
+            config["output_dim"] = 2048
     return config
+
+
+def _requires_api_key(base_url: str) -> bool:
+    return not is_vertex_openai_base_url(base_url)
 
 
 # ==================== API Endpoints ====================
@@ -121,9 +130,9 @@ async def update_model_settings(request: UpdateModelSettingsRequest, _auth: str 
             emb_provider = cfg.embeddingModelPlatform or cfg.modelPlatform
 
             # Validation
-            if not vlm_key:
+            if _requires_api_key(cfg.baseUrl) and not vlm_key:
                 return convert_resp(code=400, status=400, message="VLM API key cannot be empty")
-            if not emb_key:
+            if _requires_api_key(emb_url) and not emb_key:
                 return convert_resp(
                     code=400, status=400, message="Embedding API key cannot be empty"
                 )
@@ -210,9 +219,9 @@ async def validate_llm_config(request: UpdateModelSettingsRequest, _auth: str = 
         emb_provider = cfg.embeddingModelPlatform or cfg.modelPlatform
 
         # Validation
-        if not vlm_key:
+        if _requires_api_key(cfg.baseUrl) and not vlm_key:
             return convert_resp(code=400, status=400, message="VLM API key cannot be empty")
-        if not emb_key:
+        if _requires_api_key(emb_url) and not emb_key:
             return convert_resp(code=400, status=400, message="Embedding API key cannot be empty")
         if not cfg.modelId:
             return convert_resp(code=400, status=400, message="VLM model ID cannot be empty")

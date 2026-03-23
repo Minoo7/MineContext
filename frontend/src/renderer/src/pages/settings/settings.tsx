@@ -17,6 +17,9 @@ interface SettingsProps {
   closeSetting?: () => void
   init?: boolean
 }
+const isVertexOpenAIUrl = (value?: string) =>
+  typeof value === 'string' && value.includes('aiplatform.googleapis.com') && value.includes('/endpoints/openapi')
+
 export interface InputPrefixProps {
   label: string
 }
@@ -26,9 +29,10 @@ const InputPrefix: FC<InputPrefixProps> = (props) => {
 }
 export interface CustomFormItemsProps {
   prefix: string
+  form: any
 }
 const CustomFormItems: FC<CustomFormItemsProps> = (props) => {
-  const { prefix } = props
+  const { prefix, form } = props
   return (
     <>
       <div className="flex flex-col gap-6 mb-6">
@@ -63,11 +67,23 @@ const CustomFormItems: FC<CustomFormItemsProps> = (props) => {
           <FormItem
             field={`${prefix}-apiKey`}
             className="!mb-0"
-            rules={[{ required: true, message: 'Cannot be empty' }]}
+            extra="Optional when using Vertex AI with ADC-backed backend auth"
+            rules={[
+              {
+                validator(value, callback) {
+                  const baseUrl = form.getFieldValue(`${prefix}-baseUrl`)
+                  if (!value && !isVertexOpenAIUrl(baseUrl)) {
+                    callback('Cannot be empty')
+                  } else {
+                    callback()
+                  }
+                }
+              }
+            ]}
             requiredSymbol={false}>
             <Input.Password
               addBefore={<InputPrefix label="API Key" />}
-              placeholder="Enter your API Key"
+              placeholder="Enter your API Key or leave blank for Vertex ADC"
               allowClear
               className="!w-[574px]"
               defaultVisibility={false}
@@ -103,11 +119,23 @@ const CustomFormItems: FC<CustomFormItemsProps> = (props) => {
           <FormItem
             field={`${prefix}-embeddingApiKey`}
             className="!mb-0"
-            rules={[{ required: true, message: 'Cannot be empty' }]}
+            extra="Optional when using Vertex AI with ADC-backed backend auth"
+            rules={[
+              {
+                validator(value, callback) {
+                  const baseUrl = form.getFieldValue(`${prefix}-embeddingBaseUrl`)
+                  if (!value && !isVertexOpenAIUrl(baseUrl)) {
+                    callback('Cannot be empty')
+                  } else {
+                    callback()
+                  }
+                }
+              }
+            ]}
             requiredSymbol={false}>
             <Input.Password
               addBefore={<InputPrefix label="API Key" />}
-              placeholder="Enter your API Key"
+              placeholder="Enter your API Key or leave blank for Vertex ADC"
               allowClear
               className="!w-[574px]"
               defaultVisibility={false}
@@ -310,7 +338,7 @@ const Settings: FC<SettingsProps> = (props) => {
                 {(values) => {
                   const modelPlatform = values.modelPlatform
                   if (modelPlatform === ModelTypeList.Custom) {
-                    return <CustomFormItems prefix={ModelTypeList.Custom} />
+                    return <CustomFormItems prefix={ModelTypeList.Custom} form={form} />
                   } else if (modelPlatform === ModelTypeList.Doubao) {
                     return <StandardFormItems modelPlatform={modelPlatform} prefix={ModelTypeList.Doubao} />
                   } else if (modelPlatform === ModelTypeList.OpenAI) {

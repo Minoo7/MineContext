@@ -28,6 +28,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "openai",
+    "google-auth[requests]",
     "jinja2",
     "json-repair",
     "ddgs",

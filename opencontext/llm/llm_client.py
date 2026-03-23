@@ -7,22 +7,35 @@
 OpenContext module: llm_client
 """
 
+import asyncio
+import json
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+
 from enum import Enum
 from typing import Any, Dict, List
 
 from openai import APIError, AsyncOpenAI, OpenAI
 from volcenginesdkarkruntime import Ark
 
+from opencontext.llm.vertex_auth import (
+    VertexAccessTokenProvider,
+    build_vertex_predict_url,
+    is_vertex_openai_base_url,
+    normalize_vertex_model_name,
+)
 from opencontext.models.context import Vectorize
 from opencontext.monitoring import record_processing_stage
 from opencontext.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
+_VERTEX_ADC_PLACEHOLDERS = {"vertex-adc", "adc", "use-adc"}
 
 
 class LLMProvider(Enum):
     OPENAI = "openai"
     DOUBAO = "doubao"
+    VERTEX = "vertex"
 
 
 class LLMType(Enum):
@@ -34,20 +47,60 @@ class LLMClient:
     def __init__(self, llm_type: LLMType, config: Dict[str, Any]):
         self.llm_type = llm_type
         self.config = config
-        self.model = config.get("model")
+        raw_model = config.get("model")
         self.api_key = config.get("api_key")
         self.base_url = config.get("base_url")
         self.timeout = config.get("timeout", 300)
         self.provider = config.get("provider", LLMProvider.OPENAI.value)
-        if not self.api_key or not self.base_url or not self.model:
-            raise ValueError("API key, base URL, and model must be provided")
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
-        self.async_client = AsyncOpenAI(
-            api_key=self.api_key, base_url=self.base_url, timeout=self.timeout
+        self.is_vertex_openai = self.provider == LLMProvider.VERTEX.value or is_vertex_openai_base_url(
+            self.base_url
         )
+        self.model = normalize_vertex_model_name(raw_model) if self.is_vertex_openai else raw_model
+        if not self.base_url or not self.model:
+            raise ValueError("Base URL and model must be provided")
+        if not self.api_key and not self.is_vertex_openai:
+            raise ValueError("API key, base URL, and model must be provided")
+        self._vertex_token_provider = None
+        if self.is_vertex_openai and self._should_use_vertex_adc():
+            self._vertex_token_provider = VertexAccessTokenProvider()
+        self._active_api_key = None
+        self.client = None
+        self.async_client = None
+        self._refresh_clients(force=True)
         if self.provider == LLMProvider.DOUBAO.value and self.llm_type == LLMType.EMBEDDING:
             self.client = Ark(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
             self.async_client = None
+
+    def _should_use_vertex_adc(self) -> bool:
+        token = (self.api_key or "").strip()
+        return not token or token.lower() in _VERTEX_ADC_PLACEHOLDERS
+
+    def _resolve_api_key(self) -> str:
+        if self._vertex_token_provider is not None:
+            return self._vertex_token_provider.get_access_token()
+        return self.api_key
+
+    def _get_requested_output_dim(self, kwargs: Dict[str, Any]) -> int:
+        if "output_dim" in kwargs:
+            return kwargs["output_dim"] or 0
+        if "output_dim" in self.config:
+            return self.config["output_dim"] or 0
+        return 0
+
+    def _refresh_clients(self, force: bool = False) -> None:
+        if self.provider == LLMProvider.DOUBAO.value and self.llm_type == LLMType.EMBEDDING:
+            return
+
+        active_api_key = self._resolve_api_key()
+        if not force and self.client is not None and self.async_client is not None:
+            if active_api_key == self._active_api_key:
+                return
+
+        self._active_api_key = active_api_key
+        self.client = OpenAI(api_key=active_api_key, base_url=self.base_url, timeout=self.timeout)
+        self.async_client = AsyncOpenAI(
+            api_key=active_api_key, base_url=self.base_url, timeout=self.timeout
+        )
 
     def generate(self, prompt: str, **kwargs) -> str:
         messages = [{"role": "user", "content": prompt}]
@@ -96,6 +149,7 @@ class LLMClient:
 
         request_start = time.time()
         try:
+            self._refresh_clients()
             # Stage: LLM request preparation
 
             tools = kwargs.get("tools", None)
@@ -156,6 +210,7 @@ class LLMClient:
 
         request_start = time.time()
         try:
+            self._refresh_clients()
             tools = kwargs.get("tools", None)
             thinking = kwargs.get("thinking", None)
 
@@ -207,6 +262,7 @@ class LLMClient:
     def _openai_chat_completion_stream(self, messages: List[Dict[str, Any]], **kwargs):
         """Sync stream chat completion"""
         try:
+            self._refresh_clients()
             tools = kwargs.get("tools", None)
             thinking = kwargs.get("thinking", None)
 
@@ -232,15 +288,9 @@ class LLMClient:
     async def _openai_chat_completion_stream_async(self, messages: List[Dict[str, Any]], **kwargs):
         """Async stream chat completion - async generator"""
         try:
+            self._refresh_clients()
             tools = kwargs.get("tools", None)
             thinking = kwargs.get("thinking", None)
-
-            # Create async client
-            from openai import AsyncOpenAI
-
-            async_client = AsyncOpenAI(
-                api_key=self.api_key, base_url=self.base_url, timeout=self.timeout
-            )
 
             create_params = {
                 "model": self.model,
@@ -255,7 +305,7 @@ class LLMClient:
                 if self.provider == LLMProvider.DOUBAO.value:
                     create_params["extra_body"] = {"thinking": {"type": thinking}}
 
-            stream = await async_client.chat.completions.create(**create_params)
+            stream = await self.async_client.chat.completions.create(**create_params)
 
             # Return stream object directly, it's already an async iterator
             async for chunk in stream:
@@ -266,6 +316,10 @@ class LLMClient:
 
     def _request_embedding(self, text: str, **kwargs) -> List[float]:
         try:
+            if self.is_vertex_openai:
+                return self._request_vertex_embedding(text, **kwargs)
+
+            self._refresh_clients()
             if self.provider != LLMProvider.DOUBAO.value:
                 response = self.client.embeddings.create(model=self.model, input=[text])
                 embedding = response.data[0].embedding
@@ -297,7 +351,7 @@ class LLMClient:
                 except ImportError:
                     pass  # Monitoring module not installed or initialized
 
-            output_dim = kwargs.get("output_dim", self.config.get("output_dim", 0))
+            output_dim = self._get_requested_output_dim(kwargs)
             if output_dim and len(embedding) > output_dim:
                 import math
 
@@ -313,6 +367,10 @@ class LLMClient:
 
     async def _request_embedding_async(self, text: str, **kwargs) -> List[float]:
         try:
+            if self.is_vertex_openai:
+                return await asyncio.to_thread(self._request_vertex_embedding, text, **kwargs)
+
+            self._refresh_clients()
             if self.provider == LLMProvider.DOUBAO.value:
                 # Only ark has multimodal_embeddings
                 response = self.client.multimodal_embeddings.create(
@@ -345,7 +403,7 @@ class LLMClient:
                 except ImportError:
                     pass  # Monitoring module not installed or initialized
 
-            output_dim = kwargs.get("output_dim", self.config.get("output_dim", 0))
+            output_dim = self._get_requested_output_dim(kwargs)
             if output_dim and len(embedding) > output_dim:
                 import math
 
@@ -358,6 +416,62 @@ class LLMClient:
         except APIError as e:
             logger.error(f"OpenAI API error during embedding: {e}")
             raise
+
+    def _request_vertex_embedding(self, text: str, **kwargs) -> List[float]:
+        """Call Vertex's native predict endpoint for embedding models."""
+        predict_url = build_vertex_predict_url(self.base_url, self.model)
+        access_token = self._resolve_api_key()
+
+        instance = {"content": text}
+        task_type = kwargs.get("task_type", self.config.get("task_type"))
+        title = kwargs.get("title", self.config.get("title"))
+        if task_type:
+            instance["task_type"] = task_type
+        if title:
+            instance["title"] = title
+
+        parameters = {}
+        output_dim = self._get_requested_output_dim(kwargs)
+        if output_dim:
+            parameters["outputDimensionality"] = output_dim
+
+        auto_truncate = kwargs.get("auto_truncate", self.config.get("auto_truncate"))
+        if auto_truncate is not None:
+            parameters["autoTruncate"] = auto_truncate
+
+        payload = {"instances": [instance]}
+        if parameters:
+            payload["parameters"] = parameters
+
+        request = urllib_request.Request(
+            predict_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib_request.urlopen(request, timeout=self.timeout) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Vertex embedding request failed with HTTP {exc.code}: {error_body}"
+            ) from exc
+
+        predictions = response_data.get("predictions") or []
+        if not predictions:
+            raise RuntimeError("Vertex embedding model returned empty predictions")
+
+        embeddings = predictions[0].get("embeddings") or {}
+        values = embeddings.get("values")
+        if not values:
+            raise RuntimeError("Vertex embedding model returned empty embedding values")
+
+        return values
 
     def vectorize(self, vectorize: Vectorize, **kwargs):
         if vectorize.vector:
@@ -412,6 +526,7 @@ class LLMClient:
                 "invalid_api_key": "Invalid API key provided.",
                 "model_not_found": "The model does not exist or you do not have access to it.",
                 "context_length_exceeded": "Context length exceeded.",
+                "Malformed publisher model": "Vertex AI requires publisher-qualified model names, e.g. google/gemini-2.5-flash.",
             }
 
             for code, msg in openai_errors.items():
@@ -452,6 +567,7 @@ class LLMClient:
             return error_msg[:147] + "..."
 
         try:
+            self._refresh_clients()
             if self.llm_type == LLMType.CHAT:
                 # Test with an image input - 20x20 pixel PNG with clear red square pattern
                 # This is a small but visible test image to validate vision capabilities
@@ -485,6 +601,11 @@ class LLMClient:
                         return True, "Embedding model validation successful"
                     else:
                         return False, "Embedding model returned empty response"
+                elif self.is_vertex_openai:
+                    embedding = self._request_vertex_embedding("test")
+                    if embedding:
+                        return True, "Embedding model validation successful"
+                    return False, "Embedding model returned empty response"
                 else:
                     response = self.client.embeddings.create(model=self.model, input=["test"])
                     if response.data and len(response.data) > 0 and response.data[0].embedding:
